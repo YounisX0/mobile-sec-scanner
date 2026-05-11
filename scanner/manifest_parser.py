@@ -1,0 +1,221 @@
+from pathlib import Path
+from typing import List, Optional
+from defusedxml import ElementTree as ET
+
+from scanner.models import Finding
+
+
+ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
+
+
+DANGEROUS_PERMISSIONS = {
+    "android.permission.CAMERA",
+    "android.permission.RECORD_AUDIO",
+    "android.permission.ACCESS_FINE_LOCATION",
+    "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.READ_CONTACTS",
+    "android.permission.WRITE_CONTACTS",
+    "android.permission.GET_ACCOUNTS",
+    "android.permission.READ_SMS",
+    "android.permission.SEND_SMS",
+    "android.permission.RECEIVE_SMS",
+    "android.permission.READ_PHONE_STATE",
+    "android.permission.CALL_PHONE",
+    "android.permission.READ_CALL_LOG",
+    "android.permission.WRITE_CALL_LOG",
+    "android.permission.BODY_SENSORS",
+    "android.permission.READ_EXTERNAL_STORAGE",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.MANAGE_EXTERNAL_STORAGE",
+    "android.permission.POST_NOTIFICATIONS",
+}
+
+
+def get_android_attr(element, attr_name: str) -> Optional[str]:
+    """
+    Reads Android XML attributes safely.
+    Example:
+    android:allowBackup="true"
+    """
+    return (
+        element.attrib.get(f"{ANDROID_NS}{attr_name}")
+        or element.attrib.get(f"android:{attr_name}")
+        or element.attrib.get(attr_name)
+    )
+
+
+def find_manifest_file(extracted_app_path: Path) -> Optional[Path]:
+    """
+    APKLab output usually contains AndroidManifest.xml in the root folder.
+    If not found there, we search recursively.
+    """
+    root_manifest = extracted_app_path / "AndroidManifest.xml"
+
+    if root_manifest.exists():
+        return root_manifest
+
+    matches = list(extracted_app_path.rglob("AndroidManifest.xml"))
+
+    if matches:
+        return matches[0]
+
+    return None
+
+
+def scan_manifest(extracted_app_path: Path) -> List[Finding]:
+    findings: List[Finding] = []
+
+    manifest_path = find_manifest_file(extracted_app_path)
+
+    if manifest_path is None:
+        findings.append(
+            Finding(
+                rule_id="MANIFEST_NOT_FOUND",
+                title="AndroidManifest.xml not found",
+                severity="High",
+                file_path=str(extracted_app_path),
+                evidence="No AndroidManifest.xml file was found in the extracted APK folder.",
+                impact="The scanner cannot analyze application permissions, components, or security configuration without the manifest.",
+                recommendation="Make sure the APK was correctly extracted using APKLab, Apktool, or Jadx.",
+                category="Manifest",
+            )
+        )
+        return findings
+
+    try:
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+    except Exception as error:
+        findings.append(
+            Finding(
+                rule_id="MANIFEST_PARSE_ERROR",
+                title="Failed to parse AndroidManifest.xml",
+                severity="High",
+                file_path=str(manifest_path),
+                evidence=str(error),
+                impact="The scanner could not read the Android manifest, so important security checks were skipped.",
+                recommendation="Verify that the manifest file is valid XML and was extracted correctly.",
+                category="Manifest",
+            )
+        )
+        return findings
+
+    application = root.find("application")
+
+    if application is not None:
+        findings.extend(check_application_flags(application, manifest_path))
+
+        findings.extend(check_exported_components(application, manifest_path))
+
+    findings.extend(check_dangerous_permissions(root, manifest_path))
+
+    return findings
+
+
+def check_application_flags(application, manifest_path: Path) -> List[Finding]:
+    findings: List[Finding] = []
+
+    allow_backup = get_android_attr(application, "allowBackup")
+    debuggable = get_android_attr(application, "debuggable")
+    cleartext = get_android_attr(application, "usesCleartextTraffic")
+
+    if allow_backup == "true":
+        findings.append(
+            Finding(
+                rule_id="MANIFEST_ALLOW_BACKUP_ENABLED",
+                title="Application backup is enabled",
+                severity="Medium",
+                file_path=str(manifest_path),
+                evidence='android:allowBackup="true"',
+                impact="If backup is enabled, sensitive app data may be backed up and extracted from a device backup.",
+                recommendation='Set android:allowBackup="false" unless the application has a clear secure backup requirement.',
+                category="Manifest",
+            )
+        )
+
+    if debuggable == "true":
+        findings.append(
+            Finding(
+                rule_id="MANIFEST_DEBUGGABLE_ENABLED",
+                title="Debuggable mode is enabled",
+                severity="High",
+                file_path=str(manifest_path),
+                evidence='android:debuggable="true"',
+                impact="A debuggable production app can expose internal logic and make reverse engineering or runtime inspection easier.",
+                recommendation='Set android:debuggable="false" for release builds.',
+                category="Manifest",
+            )
+        )
+
+    if cleartext == "true":
+        findings.append(
+            Finding(
+                rule_id="MANIFEST_CLEARTEXT_TRAFFIC_ENABLED",
+                title="Cleartext network traffic is enabled",
+                severity="High",
+                file_path=str(manifest_path),
+                evidence='android:usesCleartextTraffic="true"',
+                impact="The application may allow unencrypted HTTP traffic, which can expose data to interception.",
+                recommendation='Use HTTPS only and set android:usesCleartextTraffic="false".',
+                category="Manifest",
+            )
+        )
+
+    return findings
+
+
+def check_exported_components(application, manifest_path: Path) -> List[Finding]:
+    findings: List[Finding] = []
+
+    component_types = {
+        "activity": "Exported activity detected",
+        "service": "Exported service detected",
+        "receiver": "Exported broadcast receiver detected",
+        "provider": "Exported content provider detected",
+    }
+
+    for component_tag, title in component_types.items():
+        for component in application.findall(component_tag):
+            exported = get_android_attr(component, "exported")
+            component_name = get_android_attr(component, "name") or "Unknown component"
+
+            if exported == "true":
+                severity = "High" if component_tag in {"service", "provider"} else "Medium"
+
+                findings.append(
+                    Finding(
+                        rule_id=f"MANIFEST_EXPORTED_{component_tag.upper()}",
+                        title=title,
+                        severity=severity,
+                        file_path=str(manifest_path),
+                        evidence=f'{component_tag} {component_name} has android:exported="true"',
+                        impact="Exported components can be accessed by other applications. If not protected correctly, they may expose sensitive actions or data.",
+                        recommendation="Set android:exported=\"false\" unless external access is required. If exported is required, protect the component using permissions and input validation.",
+                        category="Manifest",
+                    )
+                )
+
+    return findings
+
+
+def check_dangerous_permissions(root, manifest_path: Path) -> List[Finding]:
+    findings: List[Finding] = []
+
+    for permission in root.findall("uses-permission"):
+        permission_name = get_android_attr(permission, "name")
+
+        if permission_name in DANGEROUS_PERMISSIONS:
+            findings.append(
+                Finding(
+                    rule_id="MANIFEST_DANGEROUS_PERMISSION",
+                    title="Dangerous permission requested",
+                    severity="Medium",
+                    file_path=str(manifest_path),
+                    evidence=f"<uses-permission android:name=\"{permission_name}\" />",
+                    impact="Dangerous permissions allow access to sensitive user data or device features. They increase application risk if not strictly required.",
+                    recommendation="Remove unnecessary dangerous permissions and request only the minimum permissions needed for the app functionality.",
+                    category="Manifest",
+                )
+            )
+
+    return findings
