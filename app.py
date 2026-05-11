@@ -7,6 +7,7 @@ from rich.table import Table
 
 from scanner.manifest_parser import scan_manifest
 from scanner.resource_scanner import scan_resources
+from scanner.code_scanner import scan_code
 
 
 console = Console()
@@ -80,12 +81,16 @@ def run_scan(extracted_app_path: Path):
     resource_findings = scan_resources(extracted_app_path)
     findings.extend(resource_findings)
 
+    console.print("[cyan]Running code scanner...[/cyan]")
+    code_findings = scan_code(extracted_app_path)
+    findings.extend(code_findings)
+
     return findings
 
 
 def main():
     console.print("[bold cyan]APKLab Security Scanner[/bold cyan]")
-    console.print("Phase 3: Resource and Secret Scanner\n")
+    console.print("Phase 4: Code Scanner\n")
 
     if len(sys.argv) < 2:
         console.print("[yellow]Usage:[/yellow] python app.py extracted_apps/sample_app")
