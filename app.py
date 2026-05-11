@@ -5,6 +5,7 @@ from rich.console import Console
 from rich.table import Table
 
 from scanner.rule_engine import RuleEngine
+from scanner.report_generator import generate_report_files
 
 
 console = Console()
@@ -79,9 +80,15 @@ def print_summary(summary):
         console.print(f"{category}: {count}")
 
 
+def print_report_paths(json_report_path: Path, html_report_path: Path):
+    console.print("\n[bold]Generated Reports[/bold]")
+    console.print(f"JSON report: [green]{json_report_path}[/green]")
+    console.print(f"HTML report: [green]{html_report_path}[/green]")
+
+
 def main():
     console.print("[bold cyan]APKLab Security Scanner[/bold cyan]")
-    console.print("Phase 5: Rule Engine\n")
+    console.print("Phase 6: Report Generator\n")
 
     if len(sys.argv) < 2:
         console.print("[yellow]Usage:[/yellow] python app.py extracted_apps/sample_app")
@@ -107,6 +114,14 @@ def main():
     print_findings_table(findings)
 
     print_summary(summary)
+
+    json_report_path, html_report_path = generate_report_files(
+        extracted_app_path=extracted_app_path,
+        findings=findings,
+        summary=summary,
+    )
+
+    print_report_paths(json_report_path, html_report_path)
 
     console.print("\n[bold green]Static scan completed successfully.[/bold green]")
 
