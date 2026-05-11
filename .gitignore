@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+
+reports/
+extracted_apps/
+input_apks/
+
+.env
+.DS_Store
+.vscode/
