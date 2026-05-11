@@ -6,23 +6,26 @@ from scanner.models import Finding
 from scanner.manifest_parser import scan_manifest
 from scanner.resource_scanner import scan_resources
 from scanner.code_scanner import scan_code
+from scanner.severity_engine import SeverityEngine
 
 
 ScannerFunction = Callable[[Path], List[Finding]]
 ProgressCallback = Optional[Callable[[str], None]]
 
 
-SEVERITY_ORDER = {
-    "Critical": 0,
-    "High": 1,
-    "Medium": 2,
-    "Low": 3,
-}
-
-
 class RuleEngine:
     """
     Central engine that runs all scanner modules and returns final findings.
+
+    Responsibilities:
+    1. Run manifest scanner.
+    2. Run resource/secret scanner.
+    3. Run code scanner.
+    4. Handle scanner errors safely.
+    5. Remove duplicated findings.
+    6. Send findings to severity engine.
+    7. Return final sorted findings.
+    8. Build scanner execution statistics.
     """
 
     def __init__(self, extracted_app_path: Path):
@@ -36,8 +39,12 @@ class RuleEngine:
 
         self.scanner_counts: Dict[str, int] = {}
         self.findings: List[Finding] = []
+        self.risk_summary: Dict[str, object] = {}
 
     def run(self, progress_callback: ProgressCallback = None) -> List[Finding]:
+        """
+        Runs all scanner modules and returns cleaned, scored, and sorted findings.
+        """
         all_findings: List[Finding] = []
 
         for scanner_name, scanner_function in self.scanners:
@@ -66,12 +73,19 @@ class RuleEngine:
                 )
 
         cleaned_findings = self.remove_duplicate_findings(all_findings)
-        sorted_findings = self.sort_findings(cleaned_findings)
 
-        self.findings = sorted_findings
+        severity_engine = SeverityEngine(cleaned_findings)
+        processed_findings = severity_engine.process()
+
+        self.findings = processed_findings
+        self.risk_summary = severity_engine.build_risk_summary()
+
         return self.findings
 
     def remove_duplicate_findings(self, findings: List[Finding]) -> List[Finding]:
+        """
+        Removes exact duplicate findings.
+        """
         unique_findings: List[Finding] = []
         seen_keys = set()
 
@@ -90,20 +104,22 @@ class RuleEngine:
 
         return unique_findings
 
-    def sort_findings(self, findings: List[Finding]) -> List[Finding]:
-        return sorted(
-            findings,
-            key=lambda finding: (
-                SEVERITY_ORDER.get(finding.severity, 99),
-                finding.category,
-                finding.rule_id,
-            ),
-        )
-
     def get_scanner_counts(self) -> Dict[str, int]:
+        """
+        Returns how many findings each scanner module produced.
+        """
         return self.scanner_counts
 
+    def get_risk_summary(self) -> Dict[str, object]:
+        """
+        Returns calculated risk summary.
+        """
+        return self.risk_summary
+
     def build_summary(self) -> Dict[str, object]:
+        """
+        Builds a summary from the final scored findings.
+        """
         severity_counts = Counter(finding.severity for finding in self.findings)
         category_counts = Counter(finding.category for finding in self.findings)
 
@@ -117,4 +133,5 @@ class RuleEngine:
             },
             "category_counts": dict(category_counts),
             "scanner_counts": self.scanner_counts,
+            "risk_summary": self.risk_summary,
         }

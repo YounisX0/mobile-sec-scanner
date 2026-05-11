@@ -37,6 +37,19 @@ def print_module_results(scanner_counts):
     console.print(table)
 
 
+def print_risk_summary(risk_summary):
+    table = Table(title="Risk Summary")
+
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="bold")
+
+    table.add_row("Overall Risk Level", str(risk_summary.get("overall_risk_level", "Unknown")))
+    table.add_row("Max Risk Score", str(risk_summary.get("max_risk_score", 0)))
+    table.add_row("Average Risk Score", str(risk_summary.get("average_risk_score", 0)))
+
+    console.print(table)
+
+
 def print_findings_table(findings):
     if not findings:
         console.print("[green]No issues found.[/green]")
@@ -46,6 +59,8 @@ def print_findings_table(findings):
 
     table.add_column("#", style="cyan", justify="right")
     table.add_column("Severity", style="bold")
+    table.add_column("Risk")
+    table.add_column("Score", justify="right")
     table.add_column("Category")
     table.add_column("Rule ID")
     table.add_column("Title")
@@ -55,6 +70,8 @@ def print_findings_table(findings):
         table.add_row(
             str(index),
             finding.severity,
+            finding.risk_level,
+            str(finding.risk_score),
             finding.category,
             finding.rule_id,
             finding.title,
@@ -88,7 +105,7 @@ def print_report_paths(json_report_path: Path, html_report_path: Path):
 
 def main():
     console.print("[bold cyan]APKLab Security Scanner[/bold cyan]")
-    console.print("Phase 6: Report Generator\n")
+    console.print("Phase 7: Severity Engine and Risk Scoring\n")
 
     if len(sys.argv) < 2:
         console.print("[yellow]Usage:[/yellow] python app.py extracted_apps/sample_app")
@@ -106,9 +123,13 @@ def main():
     )
 
     summary = engine.build_summary()
+    risk_summary = engine.get_risk_summary()
 
     console.print()
     print_module_results(engine.get_scanner_counts())
+
+    console.print()
+    print_risk_summary(risk_summary)
 
     console.print()
     print_findings_table(findings)
