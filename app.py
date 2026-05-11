@@ -1,13 +1,10 @@
 import sys
 from pathlib import Path
-from collections import Counter
 
 from rich.console import Console
 from rich.table import Table
 
-from scanner.manifest_parser import scan_manifest
-from scanner.resource_scanner import scan_resources
-from scanner.code_scanner import scan_code
+from scanner.rule_engine import RuleEngine
 
 
 console = Console()
@@ -25,6 +22,18 @@ def validate_input_path(path: str) -> Path:
         sys.exit(1)
 
     return target_path
+
+
+def print_module_results(scanner_counts):
+    table = Table(title="Scanner Module Results")
+
+    table.add_column("Scanner Module", style="cyan")
+    table.add_column("Findings", style="bold", justify="right")
+
+    for scanner_name, count in scanner_counts.items():
+        table.add_row(scanner_name, str(count))
+
+    console.print(table)
 
 
 def print_findings_table(findings):
@@ -54,12 +63,12 @@ def print_findings_table(findings):
     console.print(table)
 
 
-def print_summary(findings):
-    severity_counts = Counter(finding.severity for finding in findings)
-    category_counts = Counter(finding.category for finding in findings)
+def print_summary(summary):
+    severity_counts = summary["severity_counts"]
+    category_counts = summary["category_counts"]
 
     console.print("\n[bold]Scan Summary[/bold]")
-    console.print(f"Total findings: [bold]{len(findings)}[/bold]")
+    console.print(f"Total findings: [bold]{summary['total_findings']}[/bold]")
     console.print(f"Critical: {severity_counts.get('Critical', 0)}")
     console.print(f"High: {severity_counts.get('High', 0)}")
     console.print(f"Medium: {severity_counts.get('Medium', 0)}")
@@ -70,27 +79,9 @@ def print_summary(findings):
         console.print(f"{category}: {count}")
 
 
-def run_scan(extracted_app_path: Path):
-    findings = []
-
-    console.print("[cyan]Running manifest scanner...[/cyan]")
-    manifest_findings = scan_manifest(extracted_app_path)
-    findings.extend(manifest_findings)
-
-    console.print("[cyan]Running resource and secret scanner...[/cyan]")
-    resource_findings = scan_resources(extracted_app_path)
-    findings.extend(resource_findings)
-
-    console.print("[cyan]Running code scanner...[/cyan]")
-    code_findings = scan_code(extracted_app_path)
-    findings.extend(code_findings)
-
-    return findings
-
-
 def main():
     console.print("[bold cyan]APKLab Security Scanner[/bold cyan]")
-    console.print("Phase 4: Code Scanner\n")
+    console.print("Phase 5: Rule Engine\n")
 
     if len(sys.argv) < 2:
         console.print("[yellow]Usage:[/yellow] python app.py extracted_apps/sample_app")
@@ -101,12 +92,23 @@ def main():
     console.print("[green]Input folder is valid.[/green]")
     console.print(f"Scanning target: [bold]{extracted_app_path}[/bold]\n")
 
-    findings = run_scan(extracted_app_path)
+    engine = RuleEngine(extracted_app_path)
 
+    findings = engine.run(
+        progress_callback=lambda message: console.print(f"[cyan]{message}[/cyan]")
+    )
+
+    summary = engine.build_summary()
+
+    console.print()
+    print_module_results(engine.get_scanner_counts())
+
+    console.print()
     print_findings_table(findings)
-    print_summary(findings)
 
-    console.print("\n[bold green]Static scan completed.[/bold green]")
+    print_summary(summary)
+
+    console.print("\n[bold green]Static scan completed successfully.[/bold green]")
 
 
 if __name__ == "__main__":
