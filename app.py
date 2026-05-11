@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.table import Table
 
 from scanner.manifest_parser import scan_manifest
+from scanner.resource_scanner import scan_resources
 
 
 console = Console()
@@ -30,10 +31,11 @@ def print_findings_table(findings):
         console.print("[green]No issues found.[/green]")
         return
 
-    table = Table(title="Manifest Scan Findings")
+    table = Table(title="APK Static Security Scan Findings")
 
     table.add_column("#", style="cyan", justify="right")
     table.add_column("Severity", style="bold")
+    table.add_column("Category")
     table.add_column("Rule ID")
     table.add_column("Title")
     table.add_column("Evidence")
@@ -42,6 +44,7 @@ def print_findings_table(findings):
         table.add_row(
             str(index),
             finding.severity,
+            finding.category,
             finding.rule_id,
             finding.title,
             finding.evidence,
@@ -52,6 +55,7 @@ def print_findings_table(findings):
 
 def print_summary(findings):
     severity_counts = Counter(finding.severity for finding in findings)
+    category_counts = Counter(finding.category for finding in findings)
 
     console.print("\n[bold]Scan Summary[/bold]")
     console.print(f"Total findings: [bold]{len(findings)}[/bold]")
@@ -60,10 +64,28 @@ def print_summary(findings):
     console.print(f"Medium: {severity_counts.get('Medium', 0)}")
     console.print(f"Low: {severity_counts.get('Low', 0)}")
 
+    console.print("\n[bold]Findings by Category[/bold]")
+    for category, count in category_counts.items():
+        console.print(f"{category}: {count}")
+
+
+def run_scan(extracted_app_path: Path):
+    findings = []
+
+    console.print("[cyan]Running manifest scanner...[/cyan]")
+    manifest_findings = scan_manifest(extracted_app_path)
+    findings.extend(manifest_findings)
+
+    console.print("[cyan]Running resource and secret scanner...[/cyan]")
+    resource_findings = scan_resources(extracted_app_path)
+    findings.extend(resource_findings)
+
+    return findings
+
 
 def main():
     console.print("[bold cyan]APKLab Security Scanner[/bold cyan]")
-    console.print("Phase 2: Manifest Parser\n")
+    console.print("Phase 3: Resource and Secret Scanner\n")
 
     if len(sys.argv) < 2:
         console.print("[yellow]Usage:[/yellow] python app.py extracted_apps/sample_app")
@@ -74,12 +96,12 @@ def main():
     console.print("[green]Input folder is valid.[/green]")
     console.print(f"Scanning target: [bold]{extracted_app_path}[/bold]\n")
 
-    findings = scan_manifest(extracted_app_path)
+    findings = run_scan(extracted_app_path)
 
     print_findings_table(findings)
     print_summary(findings)
 
-    console.print("\n[bold green]Manifest scan completed.[/bold green]")
+    console.print("\n[bold green]Static scan completed.[/bold green]")
 
 
 if __name__ == "__main__":
