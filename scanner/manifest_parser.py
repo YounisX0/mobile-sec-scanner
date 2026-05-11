@@ -32,11 +32,6 @@ DANGEROUS_PERMISSIONS = {
 
 
 def get_android_attr(element, attr_name: str) -> Optional[str]:
-    """
-    Reads Android XML attributes safely.
-    Example:
-    android:allowBackup="true"
-    """
     return (
         element.attrib.get(f"{ANDROID_NS}{attr_name}")
         or element.attrib.get(f"android:{attr_name}")
@@ -45,10 +40,6 @@ def get_android_attr(element, attr_name: str) -> Optional[str]:
 
 
 def find_manifest_file(extracted_app_path: Path) -> Optional[Path]:
-    """
-    APKLab output usually contains AndroidManifest.xml in the root folder.
-    If not found there, we search recursively.
-    """
     root_manifest = extracted_app_path / "AndroidManifest.xml"
 
     if root_manifest.exists():
@@ -60,6 +51,31 @@ def find_manifest_file(extracted_app_path: Path) -> Optional[Path]:
         return matches[0]
 
     return None
+
+
+def component_has_launcher_intent(component) -> bool:
+    for intent_filter in component.findall("intent-filter"):
+        has_main = False
+        has_launcher = False
+
+        for action in intent_filter.findall("action"):
+            action_name = get_android_attr(action, "name")
+            if action_name == "android.intent.action.MAIN":
+                has_main = True
+
+        for category in intent_filter.findall("category"):
+            category_name = get_android_attr(category, "name")
+            if category_name == "android.intent.category.LAUNCHER":
+                has_launcher = True
+
+        if has_main and has_launcher:
+            return True
+
+    return False
+
+
+def component_has_intent_filter(component) -> bool:
+    return component.find("intent-filter") is not None
 
 
 def scan_manifest(extracted_app_path: Path) -> List[Finding]:
@@ -104,7 +120,6 @@ def scan_manifest(extracted_app_path: Path) -> List[Finding]:
 
     if application is not None:
         findings.extend(check_application_flags(application, manifest_path))
-
         findings.extend(check_exported_components(application, manifest_path))
 
     findings.extend(check_dangerous_permissions(root, manifest_path))
@@ -174,35 +189,71 @@ def check_exported_components(application, manifest_path: Path) -> List[Finding]
         "provider": "Exported content provider detected",
     }
 
-    for component_tag, title in component_types.items():
+    for component_tag, default_title in component_types.items():
         for component in application.findall(component_tag):
             exported = get_android_attr(component, "exported")
             component_name = get_android_attr(component, "name") or "Unknown component"
+            permission = get_android_attr(component, "permission")
 
-            if exported == "true":
+            if exported != "true":
+                continue
+
+            is_launcher = component_tag == "activity" and component_has_launcher_intent(component)
+            has_permission = permission is not None and permission.strip() != ""
+
+            if is_launcher:
+                severity = "Low"
+                title = "Exported launcher activity detected"
+                impact = "Launcher activities are normally exported so users can open the app. This is usually expected, but it should not expose sensitive logic directly."
+                recommendation = "Keep launcher activity minimal and route sensitive actions behind authentication and validation."
+
+            elif has_permission:
+                severity = "Low"
+                title = f"{default_title} with permission protection"
+                impact = "The component is exported but protected by a permission. Risk depends on whether the permission is strong and correctly enforced."
+                recommendation = "Verify that the protecting permission is not weak, overly broad, or accessible to untrusted apps."
+
+            else:
                 severity = "High" if component_tag in {"service", "provider"} else "Medium"
+                title = default_title
+                impact = "Exported components can be accessed by other applications. If not protected correctly, they may expose sensitive actions or data."
+                recommendation = "Set android:exported=\"false\" unless external access is required. If exported is required, protect the component using permissions and strict input validation."
 
-                findings.append(
-                    Finding(
-                        rule_id=f"MANIFEST_EXPORTED_{component_tag.upper()}",
-                        title=title,
-                        severity=severity,
-                        file_path=str(manifest_path),
-                        evidence=f'{component_tag} {component_name} has android:exported="true"',
-                        impact="Exported components can be accessed by other applications. If not protected correctly, they may expose sensitive actions or data.",
-                        recommendation="Set android:exported=\"false\" unless external access is required. If exported is required, protect the component using permissions and input validation.",
-                        category="Manifest",
-                    )
+            evidence = f'{component_tag} {component_name} has android:exported="true"'
+
+            if has_permission:
+                evidence += f' and android:permission="{permission}"'
+
+            findings.append(
+                Finding(
+                    rule_id=f"MANIFEST_EXPORTED_{component_tag.upper()}",
+                    title=title,
+                    severity=severity,
+                    file_path=str(manifest_path),
+                    evidence=evidence,
+                    impact=impact,
+                    recommendation=recommendation,
+                    category="Manifest",
                 )
+            )
 
     return findings
 
 
 def check_dangerous_permissions(root, manifest_path: Path) -> List[Finding]:
     findings: List[Finding] = []
+    seen_permissions = set()
 
     for permission in root.findall("uses-permission"):
         permission_name = get_android_attr(permission, "name")
+
+        if not permission_name:
+            continue
+
+        if permission_name in seen_permissions:
+            continue
+
+        seen_permissions.add(permission_name)
 
         if permission_name in DANGEROUS_PERMISSIONS:
             findings.append(
@@ -211,7 +262,7 @@ def check_dangerous_permissions(root, manifest_path: Path) -> List[Finding]:
                     title="Dangerous permission requested",
                     severity="Medium",
                     file_path=str(manifest_path),
-                    evidence=f"<uses-permission android:name=\"{permission_name}\" />",
+                    evidence=f'<uses-permission android:name="{permission_name}" />',
                     impact="Dangerous permissions allow access to sensitive user data or device features. They increase application risk if not strictly required.",
                     recommendation="Remove unnecessary dangerous permissions and request only the minimum permissions needed for the app functionality.",
                     category="Manifest",

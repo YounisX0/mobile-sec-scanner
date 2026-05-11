@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import List, Dict, Pattern, Tuple
+from typing import List, Dict, Pattern, Tuple, Optional
 
 from scanner.models import Finding
 
@@ -19,6 +19,31 @@ TEXT_FILE_EXTENSIONS = {
     ".conf",
     ".config",
     ".cfg",
+    ".ini",
+}
+
+MAX_TEXT_FILE_SIZE_BYTES = 2 * 1024 * 1024
+
+
+IGNORED_DIRS = {
+    "__pycache__",
+    ".git",
+    "build",
+    "dist",
+    "node_modules",
+    "reports",
+    "venv",
+    ".gradle",
+}
+
+
+BENIGN_FILE_NAMES = {
+    "license",
+    "license.txt",
+    "notice",
+    "notice.txt",
+    "readme",
+    "readme.txt",
 }
 
 
@@ -26,7 +51,34 @@ BENIGN_URL_PREFIXES = (
     "http://schemas.android.com/",
     "http://www.w3.org/",
     "http://xmlpull.org/",
+    "http://www.apache.org/licenses/",
+    "http://apache.org/licenses/",
+    "http://creativecommons.org/",
+    "http://opensource.org/",
+    "http://www.slf4j.org/",
 )
+
+
+PLACEHOLDER_SECRET_VALUES = {
+    "password",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "your_api_key",
+    "your-token",
+    "your_token",
+    "changeme",
+    "change_me",
+    "example",
+    "sample",
+    "demo",
+    "test",
+    "null",
+    "none",
+    "true",
+    "false",
+}
 
 
 SECRET_PATTERNS: List[Dict[str, object]] = [
@@ -38,6 +90,16 @@ SECRET_PATTERNS: List[Dict[str, object]] = [
         "pattern": re.compile(r"AIza[0-9A-Za-z_\-]{20,45}"),
         "impact": "Hardcoded Google API keys may allow unauthorized access to Google services if restrictions are not properly configured.",
         "recommendation": "Move API keys to a secure backend or restrict the key by package name, SHA-1 certificate, API scope, and usage limits.",
+        "mask": True,
+    },
+    {
+        "rule_id": "RESOURCE_AWS_ACCESS_KEY",
+        "title": "Possible AWS access key found",
+        "severity": "Critical",
+        "category": "Secrets",
+        "pattern": re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+        "impact": "Hardcoded cloud access keys can allow unauthorized access to cloud resources.",
+        "recommendation": "Remove the key from the application, rotate it immediately, and use backend-controlled credentials instead.",
         "mask": True,
     },
     {
@@ -68,7 +130,7 @@ SECRET_PATTERNS: List[Dict[str, object]] = [
         "title": "JWT token found",
         "severity": "Critical",
         "category": "Secrets",
-        "pattern": re.compile(r"eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"),
+        "pattern": re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"),
         "impact": "Hardcoded JWT tokens may expose authenticated sessions or backend authorization data.",
         "recommendation": "Never store JWT tokens inside app resources. Generate tokens dynamically after authentication and rotate exposed credentials.",
         "mask": True,
@@ -79,11 +141,12 @@ SECRET_PATTERNS: List[Dict[str, object]] = [
         "severity": "High",
         "category": "Secrets",
         "pattern": re.compile(
-            r"(?i)(password|passwd|pwd|secret|token|api[_\-]?key|client[_\-]?secret)\s*[:=]\s*[\"']?([A-Za-z0-9_\-@#$%^&*+.=]{6,})"
+            r"(?i)\b(password|passwd|pwd|secret|token|api[_\-]?key|client[_\-]?secret|access[_\-]?token|auth[_\-]?token)\b\s*[:=]\s*[\"']?([A-Za-z0-9_\-@#$%^&*+.=/]{8,})"
         ),
         "impact": "Hardcoded secrets can be extracted from the APK and reused by attackers.",
         "recommendation": "Remove secrets from client-side files and store sensitive credentials on a secure backend service.",
         "mask": True,
+        "value_group": 2,
     },
     {
         "rule_id": "RESOURCE_PRIVATE_KEY",
@@ -112,41 +175,37 @@ SECRET_PATTERNS: List[Dict[str, object]] = [
 
 
 def is_text_file(file_path: Path) -> bool:
-    """
-    Returns True if the file extension is a text-based format that can be safely scanned.
-    """
     return file_path.suffix.lower() in TEXT_FILE_EXTENSIONS
 
 
 def should_skip_file(file_path: Path) -> bool:
-    """
-    Skips unnecessary folders that should not be scanned.
-    """
-    ignored_parts = {
-        "__pycache__",
-        ".git",
-        "build",
-        "dist",
-        "node_modules",
-    }
+    if any(part in IGNORED_DIRS for part in file_path.parts):
+        return True
 
-    return any(part in ignored_parts for part in file_path.parts)
+    if file_path.name.lower() in BENIGN_FILE_NAMES:
+        return True
+
+    try:
+        if file_path.stat().st_size > MAX_TEXT_FILE_SIZE_BYTES:
+            return True
+    except OSError:
+        return True
+
+    return False
 
 
 def read_text_safely(file_path: Path) -> str:
-    """
-    Reads text files safely without crashing on encoding issues.
-    """
     try:
         return file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return ""
 
 
+def get_line_number(content: str, position: int) -> int:
+    return content.count("\n", 0, position) + 1
+
+
 def mask_sensitive_value(value: str) -> str:
-    """
-    Masks sensitive values so the report shows evidence without fully exposing secrets.
-    """
     value = value.strip()
 
     if len(value) <= 10:
@@ -155,26 +214,44 @@ def mask_sensitive_value(value: str) -> str:
     return f"{value[:6]}...{value[-4:]}"
 
 
-def build_evidence(match_text: str, should_mask: bool) -> str:
-    """
-    Prepares the evidence text shown in the terminal/report.
-    """
+def extract_secret_value(match, value_group: Optional[int]) -> str:
+    if value_group is None:
+        return match.group(0)
+
+    try:
+        return match.group(value_group)
+    except IndexError:
+        return match.group(0)
+
+
+def is_placeholder_secret(value: str) -> bool:
+    cleaned = value.strip().strip("\"'").lower()
+
+    if cleaned in PLACEHOLDER_SECRET_VALUES:
+        return True
+
+    if cleaned.startswith("your_") or cleaned.startswith("your-"):
+        return True
+
+    if len(set(cleaned)) <= 2 and len(cleaned) > 8:
+        return True
+
+    return False
+
+
+def build_evidence(match_text: str, should_mask: bool, line_number: int) -> str:
     clean_text = match_text.strip().replace("\n", " ")
 
     if should_mask:
-        return mask_sensitive_value(clean_text)
+        clean_text = mask_sensitive_value(clean_text)
 
     if len(clean_text) > 140:
-        return clean_text[:140] + "..."
+        clean_text = clean_text[:140] + "..."
 
-    return clean_text
+    return f"Line {line_number}: {clean_text}"
 
 
-def is_benign_match(match_text: str) -> bool:
-    """
-    Ignores common harmless URLs that appear in XML namespaces,
-    such as http://schemas.android.com/apk/res/android.
-    """
+def is_benign_url(match_text: str) -> bool:
     clean_text = match_text.strip().lower()
 
     return any(
@@ -184,9 +261,6 @@ def is_benign_match(match_text: str) -> bool:
 
 
 def scan_resources(extracted_app_path: Path) -> List[Finding]:
-    """
-    Scans resource/config/text files for exposed secrets and insecure URLs.
-    """
     findings: List[Finding] = []
     seen_findings = set()
 
@@ -206,16 +280,29 @@ def scan_resources(extracted_app_path: Path) -> List[Finding]:
 
         for rule in SECRET_PATTERNS:
             pattern: Pattern[str] = rule["pattern"]  # type: ignore
+            value_group = rule.get("value_group")
 
             for match in pattern.finditer(content):
                 match_text = match.group(0)
 
-                if is_benign_match(match_text):
+                if str(rule["rule_id"]) == "RESOURCE_HTTP_URL" and is_benign_url(match_text):
                     continue
+
+                secret_value = extract_secret_value(
+                    match=match,
+                    value_group=value_group if isinstance(value_group, int) else None,
+                )
+
+                if str(rule["rule_id"]) == "RESOURCE_HARDCODED_SECRET_VALUE":
+                    if is_placeholder_secret(secret_value):
+                        continue
+
+                line_number = get_line_number(content, match.start())
 
                 evidence = build_evidence(
                     match_text=match_text,
                     should_mask=bool(rule["mask"]),
+                    line_number=line_number,
                 )
 
                 duplicate_key: Tuple[str, str, str] = (
